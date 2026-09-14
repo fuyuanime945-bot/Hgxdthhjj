@@ -6,8 +6,8 @@ import base64
 import time
 import threading
 import re
-
-# ================= CONFIG =================
+import html
+from concurrent.futures import ThreadPoolExecutor
 
 TOKEN = "8772869279:AAFPJXR3lWQtCqTiP535o1zn3kVLj3n7cE0"
 
@@ -26,15 +26,9 @@ bot = telebot.TeleBot(
 )
 
 lock = threading.RLock()
+send_pool = ThreadPoolExecutor(max_workers=8)
 
-# Cache bot username
-try:
-    BOT_USERNAME = bot.get_me().username
-except Exception:
-    BOT_USERNAME = ""
-
-
-# ================= DATABASE =================
+BOT_USERNAME = ""
 
 def load_json(path, default):
     if not os.path.exists(path):
@@ -43,9 +37,9 @@ def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        print("Load Error:", e)
         return default
-
 
 def save_json(path, data):
     with lock:
@@ -61,6 +55,7 @@ def save_json(path, data):
                 )
 
             os.replace(temp, path)
+            return True
 
         except Exception as e:
             print("Save Error:", e)
@@ -68,23 +63,32 @@ def save_json(path, data):
             try:
                 if os.path.exists(temp):
                     os.remove(temp)
-            except Exception:
+            except:
                 pass
 
+            return False
 
 files_db = load_json(DB_FILE, {})
 users_db = set(load_json(USERS_DB_FILE, []))
 
-
 def save_files():
-    save_json(DB_FILE, files_db)
-
+    return save_json(DB_FILE, files_db)
 
 def save_users():
-    save_json(USERS_DB_FILE, list(users_db))
+    return save_json(USERS_DB_FILE, list(users_db))
 
+def get_bot_username():
+    global BOT_USERNAME
 
-# ================= HELPERS =================
+    if BOT_USERNAME:
+        return BOT_USERNAME
+
+    try:
+        BOT_USERNAME = bot.get_me().username or ""
+    except Exception as e:
+        print("Username Error:", e)
+
+    return BOT_USERNAME
 
 def normalize(text):
     if not text:
@@ -96,28 +100,25 @@ def normalize(text):
         str(text).lower()
     )
 
-
 def clean_filename(name):
     if not name:
         return "Unknown"
 
-    name = str(name)
+    name = str(name).strip()
 
-    name = re.sub(
+    return re.sub(
         r"\.(mp4|mkv|avi|mov|webm|mp3|m4a|flac|zip|rar)$",
         "",
         name,
         flags=re.I
-    )
-
-    return name.strip()
-
+    ).strip() or "Unknown"
 
 def anime_name(name):
     name = clean_filename(name)
 
     patterns = (
         r"[\s._\-]+s\d{1,2}e\d{1,4}.*$",
+        r"[\s._\-]+season[\s._\-]*\d+.*$",
         r"[\s._\-]+episode[\s._\-]*\d+.*$",
         r"[\s._\-]+ep[\s._\-]*\d+.*$",
         r"[\s._\-]+\d{1,4}$"
@@ -133,12 +134,10 @@ def anime_name(name):
 
     return name.strip() or "Unknown Anime"
 
-
 def encode(text):
     return base64.urlsafe_b64encode(
         text.encode("utf-8")
     ).decode().rstrip("=")
-
 
 def decode(text):
     try:
@@ -148,27 +147,28 @@ def decode(text):
             text
         ).decode("utf-8")
 
-    except Exception:
+    except:
         return None
 
+def safe(text):
+    return html.escape(
+        str(text or "")
+    )
 
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-
 def add_user(user_id):
-    if user_id in users_db:
+    if not user_id:
         return
 
     with lock:
-        if user_id not in users_db:
-            users_db.add(user_id)
+        if user_id in users_db:
+            return
 
-            try:
-                save_users()
-            except Exception:
-                pass
+        users_db.add(user_id)
 
+    save_users()
 
 def send(chat_id, text, **kwargs):
     try:
@@ -180,9 +180,6 @@ def send(chat_id, text, **kwargs):
     except Exception as e:
         print("Send Error:", e)
         return None
-
-
-# ================= CHANNEL =================
 
 def is_joined(user_id):
     try:
@@ -197,13 +194,10 @@ def is_joined(user_id):
             "member"
         )
 
-    except Exception as e:
-        print("Join Check:", e)
+    except Exception:
         return False
 
-
 def join_message(chat_id):
-
     markup = types.InlineKeyboardMarkup()
 
     markup.row(
@@ -226,25 +220,26 @@ def join_message(chat_id):
 ❌ <b>Channel ကို အရင် Join ပေးပါ</b>
 
 🎬 Anime Bot အသုံးပြုရန်
-Burmese Anime Channel ကို Join ထားပေးပါဗျာ။
+<b>Burmese Anime</b> Channel ကို Join ထားပေးပါ
+
+Join ပြီးရင် <b>✅ Join ပြီးပြီ</b> ကိုနှိပ်ပါ
 """,
         reply_markup=markup,
         parse_mode="HTML"
     )
 
-
 @bot.callback_query_handler(
     func=lambda call: call.data == "check_join"
 )
 def check_join(call):
-
     user_id = call.from_user.id
 
     if is_joined(user_id):
+        add_user(user_id)
 
         bot.answer_callback_query(
             call.id,
-            "✅ အောင်မြင်ပါတယ်"
+            "✅ Join အောင်မြင်ပါတယ်"
         )
 
         try:
@@ -252,30 +247,24 @@ def check_join(call):
                 """
 ✅ <b>Join အောင်မြင်ပါတယ်</b>
 
-🎬 Bot ကို စတင်အသုံးပြုနိုင်ပါပြီ။
+🎬 Bot ကို စတင်အသုံးပြုနိုင်ပါပြီ
 
-/start ကိုနှိပ်ပါ။
+/start ကိုနှိပ်ပါ
 """,
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="HTML"
             )
-        except Exception:
+        except:
             pass
-
     else:
-
         bot.answer_callback_query(
             call.id,
             "❌ Channel ကို အရင် Join ပေးပါ",
             show_alert=True
         )
 
-
-# ================= SEARCH =================
-
 def search_files(keyword):
-
     keyword = normalize(keyword)
 
     if not keyword:
@@ -284,149 +273,129 @@ def search_files(keyword):
     results = []
 
     with lock:
-        for file_id, data in files_db.items():
+        data_list = list(files_db.items())
 
-            name = normalize(
-                data.get("name", "")
-            )
+    for file_id, data in data_list:
+        name = normalize(data.get("name", ""))
+        anime = normalize(data.get("anime", ""))
 
-            anime = normalize(
-                data.get("anime", "")
-            )
-
-            if keyword in name or keyword in anime:
-                item = data.copy()
-                item["_id"] = file_id
-                results.append(item)
+        if keyword in name or keyword in anime:
+            item = data.copy()
+            item["_id"] = file_id
+            results.append(item)
 
     return results
 
+def send_one_file(chat_id, data):
+    try:
+        file_id = data.get("file_id")
+        file_type = data.get("type")
+        caption = data.get("caption", "")
 
-# ================= SEND FILE =================
+        if not file_id:
+            return False
+
+        if file_type == "document":
+            bot.send_document(
+                chat_id,
+                file_id,
+                caption=caption
+            )
+
+        elif file_type == "video":
+            bot.send_video(
+                chat_id,
+                file_id,
+                caption=caption,
+                supports_streaming=True
+            )
+
+        elif file_type == "audio":
+            bot.send_audio(
+                chat_id,
+                file_id,
+                caption=caption
+            )
+
+        else:
+            return False
+
+        return True
+
+    except Exception as e:
+        print("File Send Error:", e)
+        return False
 
 def send_files(chat_id, results):
+    if not results:
+        return
+
+    futures = [
+        send_pool.submit(
+            send_one_file,
+            chat_id,
+            data
+        )
+        for data in results
+    ]
 
     sent = 0
     failed = 0
 
-    for data in results:
-
+    for future in futures:
         try:
-
-            file_id = data.get("file_id")
-            file_type = data.get("type")
-            caption = data.get("caption", "")
-
-            if not file_id:
-                failed += 1
-                continue
-
-            if file_type == "document":
-
-                bot.send_document(
-                    chat_id,
-                    file_id,
-                    caption=caption
-                )
-
-            elif file_type == "video":
-
-                bot.send_video(
-                    chat_id,
-                    file_id,
-                    caption=caption,
-                    supports_streaming=True
-                )
-
-            elif file_type == "audio":
-
-                bot.send_audio(
-                    chat_id,
-                    file_id,
-                    caption=caption
-                )
-
+            if future.result():
+                sent += 1
             else:
                 failed += 1
-                continue
-
-            sent += 1
-
-        except Exception as e:
+        except:
             failed += 1
-            print("File Error:", e)
 
     if failed:
-
-        text = (
+        send(
+            chat_id,
             f"✅ <b>{sent}</b> File ပို့ပြီးပါပြီ\n"
-            f"❌ <b>{failed}</b> File ပို့မရပါ"
+            f"❌ <b>{failed}</b> File ပို့မရပါ",
+            parse_mode="HTML"
         )
-
     else:
-
-        text = (
-            f"✅ <b>{sent}</b> File ပို့ပြီးပါပြီ"
+        send(
+            chat_id,
+            f"✅ <b>{sent}</b> File ပို့ပြီးပါပြီ",
+            parse_mode="HTML"
         )
-
-    send(
-        chat_id,
-        text,
-        parse_mode="HTML"
-    )
-
-
-# ================= START =================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-
     user_id = message.from_user.id
     chat_id = message.chat.id
 
     add_user(user_id)
 
     if not is_joined(user_id):
-
         join_message(chat_id)
         return
 
-    args = message.text.split(
-        maxsplit=1
-    )
-
-    # ================= DIRECT FILE LINK =================
+    args = message.text.split(maxsplit=1)
 
     if len(args) > 1:
-
         keyword = decode(args[1])
 
         if not keyword:
-
-            send(
-                chat_id,
-                "❌ Link မမှန်ပါ"
-            )
+            send(chat_id, "❌ Link မမှန်ပါ")
             return
 
         results = search_files(keyword)
 
         if not results:
-
-            send(
-                chat_id,
-                "❌ Anime မတွေ့ပါ"
-            )
+            send(chat_id, "❌ Anime မတွေ့ပါ")
             return
 
         send_files(
             chat_id,
             results
         )
-
         return
-
-    # ================= MAIN MENU =================
 
     markup = types.InlineKeyboardMarkup()
 
@@ -443,7 +412,7 @@ def start(message):
 🎬 <b>Burmese Anime</b>
 
 Anime ကြည့်ရန်
-အောက်က <b>ကြည့်ရန်</b> Link ကိုနှိပ်ပါ။
+Channel ထဲက <b>🎬 ကြည့်ရန်</b> Link ကိုနှိပ်ပါ
 
 ❤️ Burmese Anime
 """,
@@ -451,30 +420,28 @@ Anime ကြည့်ရန်
         parse_mode="HTML"
     )
 
-
-# ================= HELP =================
-
 @bot.message_handler(commands=["help"])
 def help_command(message):
+    user_id = message.from_user.id
 
-    add_user(
-        message.from_user.id
-    )
+    add_user(user_id)
+
+    if not is_joined(user_id):
+        join_message(message.chat.id)
+        return
 
     send(
         message.chat.id,
         """
 ℹ️ <b>အသုံးပြုနည်း</b>
 
-🔗 Anime ရှိတဲ့ <b>ကြည့်ရန်</b> ကိုနှိပ်ပါ။
+🎬 Channel ထဲက
+<b>🎬 ကြည့်ရန်</b> Button ကိုနှိပ်ပါ
 
-📢 Channel Join ထားရန် လိုအပ်ပါတယ်။
+📢 Channel Join ထားရန် လိုအပ်ပါတယ်
 """,
         parse_mode="HTML"
     )
-
-
-# ================= ADMIN UPLOAD =================
 
 @bot.message_handler(
     content_types=[
@@ -484,7 +451,6 @@ def help_command(message):
     ]
 )
 def upload_file(message):
-
     if not is_admin(
         message.from_user.id
     ):
@@ -496,44 +462,29 @@ def upload_file(message):
 
     caption = message.caption or ""
 
-    # ================= DOCUMENT =================
-
     if message.document:
-
         file_id = message.document.file_id
-
         file_name = (
             message.document.file_name
             or "Unknown Anime"
         )
-
         file_type = "document"
 
-    # ================= VIDEO =================
-
     elif message.video:
-
         file_id = message.video.file_id
-
         file_name = (
             message.caption
             or "Anime Video"
         )
-
         file_type = "video"
 
-    # ================= AUDIO =================
-
     elif message.audio:
-
         file_id = message.audio.file_id
-
         file_name = (
             message.audio.file_name
             or message.caption
             or "Anime Audio"
         )
-
         file_type = "audio"
 
     else:
@@ -547,33 +498,50 @@ def upload_file(message):
         file_name
     )
 
-    files_db[file_key] = {
-        "file_id": file_id,
-        "name": file_name,
-        "anime": title,
-        "type": file_type,
-        "caption": caption,
-        "uploaded_at": int(time.time())
-    }
+    with lock:
+        for old_id, old_data in files_db.items():
+            if old_data.get("file_id") == file_id:
+                send(
+                    message.chat.id,
+                    f"""
+⚠️ <b>ဒီ File ရှိပြီးသားပါ</b>
 
-    save_files()
+🎬 {safe(old_data.get("anime"))}
 
-    # ================= LINK =================
+🆔 <code>{safe(old_id)}</code>
+""",
+                    parse_mode="HTML"
+                )
+                return
 
-    if not BOT_USERNAME:
+        files_db[file_key] = {
+            "file_id": file_id,
+            "name": file_name,
+            "anime": title,
+            "type": file_type,
+            "caption": caption,
+            "uploaded_at": int(time.time())
+        }
 
-        try:
-            BOT_USERNAME = bot.get_me().username
-        except Exception:
-            BOT_USERNAME = ""
+    if not save_files():
+        send(
+            message.chat.id,
+            "❌ Database Save မအောင်မြင်ပါ"
+        )
+        return
 
-    encoded = encode(
-        normalize(title)
-    )
+    username = get_bot_username()
+
+    if not username:
+        send(
+            message.chat.id,
+            "❌ Bot Username မရပါ"
+        )
+        return
 
     link = (
-        f"https://t.me/{BOT_USERNAME}"
-        f"?start={encoded}"
+        f"https://t.me/{username}"
+        f"?start={encode(normalize(title))}"
     )
 
     markup = types.InlineKeyboardMarkup()
@@ -590,9 +558,9 @@ def upload_file(message):
         f"""
 ✅ <b>သိမ်းပြီးပါပြီ</b>
 
-🎬 <b>{title}</b>
+🎬 <b>{safe(title)}</b>
 
-📄 <code>{file_name}</code>
+📄 <code>{safe(file_name)}</code>
 
 🆔 <code>{file_key}</code>
 """,
@@ -600,12 +568,8 @@ def upload_file(message):
         parse_mode="HTML"
     )
 
-
-# ================= ADMIN SEARCH =================
-
 @bot.message_handler(commands=["search"])
 def search_command(message):
-
     if not is_admin(
         message.from_user.id
     ):
@@ -616,7 +580,6 @@ def search_command(message):
     )
 
     if len(args) < 2:
-
         send(
             message.chat.id,
             "Usage: /search Anime Name"
@@ -628,7 +591,6 @@ def search_command(message):
     )
 
     if not results:
-
         send(
             message.chat.id,
             "❌ File မတွေ့ပါ"
@@ -640,16 +602,13 @@ def search_command(message):
         ""
     ]
 
-    for item in results[:30]:
-
+    for item in results[:50]:
         text.append(
-            f"🆔 <code>{item['_id']}</code>"
+            f"🆔 <code>{safe(item['_id'])}</code>"
         )
-
         text.append(
-            f"🎬 {item.get('name', 'Unknown')}"
+            f"🎬 {safe(item.get('name'))}"
         )
-
         text.append("")
 
     send(
@@ -658,19 +617,19 @@ def search_command(message):
         parse_mode="HTML"
     )
 
-
-# ================= ADMIN FILES =================
-
 @bot.message_handler(commands=["files"])
 def files_command(message):
-
     if not is_admin(
         message.from_user.id
     ):
         return
 
-    if not files_db:
+    with lock:
+        recent = list(
+            files_db.items()
+        )[-50:]
 
+    if not recent:
         send(
             message.chat.id,
             "📂 File မရှိသေးပါ"
@@ -678,25 +637,17 @@ def files_command(message):
         return
 
     text = [
-        "📂 <b>Files</b>",
+        "📂 <b>Recent Files</b>",
         ""
     ]
 
-    with lock:
-        recent_files = list(
-            files_db.items()
-        )[-30:]
-
-    for file_id, data in recent_files:
-
+    for file_id, data in recent:
         text.append(
-            f"🆔 <code>{file_id}</code>"
+            f"🆔 <code>{safe(file_id)}</code>"
         )
-
         text.append(
-            f"🎬 {data.get('name', 'Unknown')}"
+            f"🎬 {safe(data.get('name'))}"
         )
-
         text.append("")
 
     send(
@@ -705,12 +656,8 @@ def files_command(message):
         parse_mode="HTML"
     )
 
-
-# ================= ADMIN DELETE =================
-
 @bot.message_handler(commands=["delete"])
 def delete_file(message):
-
     if not is_admin(
         message.from_user.id
     ):
@@ -719,7 +666,6 @@ def delete_file(message):
     args = message.text.split()
 
     if len(args) < 2:
-
         send(
             message.chat.id,
             "Usage: /delete ID"
@@ -729,9 +675,7 @@ def delete_file(message):
     file_id = args[1]
 
     with lock:
-
         if file_id not in files_db:
-
             send(
                 message.chat.id,
                 "❌ File မတွေ့ပါ"
@@ -752,18 +696,14 @@ def delete_file(message):
         f"""
 ✅ <b>ဖျက်ပြီးပါပြီ</b>
 
-🎬 {name}
-🆔 <code>{file_id}</code>
+🎬 {safe(name)}
+🆔 <code>{safe(file_id)}</code>
 """,
         parse_mode="HTML"
     )
 
-
-# ================= DELETE NAME =================
-
 @bot.message_handler(commands=["delname"])
 def delete_name(message):
-
     if not is_admin(
         message.from_user.id
     ):
@@ -774,7 +714,6 @@ def delete_name(message):
     )
 
     if len(args) < 2:
-
         send(
             message.chat.id,
             "Usage: /delname Anime Name"
@@ -788,24 +727,22 @@ def delete_name(message):
     deleted = 0
 
     with lock:
-
         for file_id, data in list(
             files_db.items()
         ):
-
             name = normalize(
                 data.get("name", "")
             )
-
             anime = normalize(
                 data.get("anime", "")
             )
 
             if (
-                keyword in name
+                keyword == name
+                or keyword == anime
+                or keyword in name
                 or keyword in anime
             ):
-
                 del files_db[file_id]
                 deleted += 1
 
@@ -813,25 +750,19 @@ def delete_name(message):
 
     send(
         message.chat.id,
-        f"✅ <b>{deleted}</b> File ဖျက်ပြီးပါပြီ",
+        f"🗑 <b>{deleted}</b> File ဖျက်ပြီးပါပြီ",
         parse_mode="HTML"
     )
 
-
-# ================= DELETE ALL =================
-
 @bot.message_handler(commands=["deleteall"])
 def delete_all(message):
-
     if not is_admin(
         message.from_user.id
     ):
         return
 
     with lock:
-
         count = len(files_db)
-
         files_db.clear()
 
     save_files()
@@ -842,12 +773,8 @@ def delete_all(message):
         parse_mode="HTML"
     )
 
-
-# ================= BACKUP =================
-
 @bot.message_handler(commands=["backup"])
 def backup(message):
-
     if not is_admin(
         message.from_user.id
     ):
@@ -858,19 +785,16 @@ def backup(message):
     )
 
     try:
-
         with lock:
-
-            backup_data = files_db.copy()
+            data = files_db.copy()
 
         with open(
             filename,
             "w",
             encoding="utf-8"
         ) as f:
-
             json.dump(
-                backup_data,
+                data,
                 f,
                 ensure_ascii=False,
                 indent=2
@@ -880,15 +804,16 @@ def backup(message):
             filename,
             "rb"
         ) as f:
-
             bot.send_document(
                 message.chat.id,
                 f,
-                caption="📦 Backup"
+                caption=(
+                    f"📦 Backup\n"
+                    f"Files: {len(data)}"
+                )
             )
 
     except Exception as e:
-
         print(
             "Backup Error:",
             e
@@ -900,45 +825,36 @@ def backup(message):
         )
 
     finally:
-
         try:
             os.remove(filename)
-        except Exception:
+        except:
             pass
-
-
-# ================= STATS =================
 
 @bot.message_handler(commands=["stats"])
 def stats(message):
-
     if not is_admin(
         message.from_user.id
     ):
         return
 
     with lock:
+        total = len(files_db)
+        users = len(users_db)
 
         documents = sum(
-            1
+            x.get("type") == "document"
             for x in files_db.values()
-            if x.get("type") == "document"
         )
 
         videos = sum(
-            1
+            x.get("type") == "video"
             for x in files_db.values()
-            if x.get("type") == "video"
         )
 
         audios = sum(
-            1
+            x.get("type") == "audio"
             for x in files_db.values()
-            if x.get("type") == "audio"
         )
-
-        total = len(files_db)
-        users = len(users_db)
 
     send(
         message.chat.id,
@@ -946,7 +862,6 @@ def stats(message):
 📊 <b>BOT STATS</b>
 
 👥 Users: <b>{users}</b>
-
 🎬 Total: <b>{total}</b>
 
 📄 Documents: <b>{documents}</b>
@@ -956,12 +871,88 @@ def stats(message):
         parse_mode="HTML"
     )
 
+@bot.message_handler(commands=["users"])
+def users_command(message):
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
 
-# ================= RELOAD =================
+    with lock:
+        total = len(users_db)
+
+    send(
+        message.chat.id,
+        f"👥 Total Users: <b>{total}</b>",
+        parse_mode="HTML"
+    )
+
+@bot.message_handler(commands=["broadcast"])
+def broadcast_command(message):
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
+
+    args = message.text.split(
+        maxsplit=1
+    )
+
+    if len(args) < 2:
+        send(
+            message.chat.id,
+            "Usage: /broadcast Message"
+        )
+        return
+
+    text = args[1]
+
+    with lock:
+        target_users = list(users_db)
+
+    def broadcast_one(user_id):
+        try:
+            bot.send_message(
+                user_id,
+                text
+            )
+            return True
+        except:
+            return False
+
+    futures = [
+        send_pool.submit(
+            broadcast_one,
+            user_id
+        )
+        for user_id in target_users
+    ]
+
+    success = 0
+    failed = 0
+
+    for future in futures:
+        try:
+            if future.result():
+                success += 1
+            else:
+                failed += 1
+        except:
+            failed += 1
+
+    send(
+        message.chat.id,
+        f"""
+📢 <b>Broadcast Complete</b>
+
+✅ Sent: <b>{success}</b>
+❌ Failed: <b>{failed}</b>
+""",
+        parse_mode="HTML"
+    )
 
 @bot.message_handler(commands=["reload"])
 def reload_db(message):
-
     global files_db
     global users_db
 
@@ -983,28 +974,56 @@ def reload_db(message):
     )
 
     with lock:
-
         files_db = new_files
         users_db = new_users
 
     send(
         message.chat.id,
-        "♻️ Database Reloaded"
+        f"""
+♻️ <b>Database Reloaded</b>
+
+🎬 Files: <b>{len(files_db)}</b>
+👥 Users: <b>{len(users_db)}</b>
+""",
+        parse_mode="HTML"
     )
 
+@bot.message_handler(commands=["admin"])
+def admin_help(message):
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
 
-# ================= RUN =================
+    send(
+        message.chat.id,
+        """
+🛠 <b>ADMIN</b>
 
-print("🤖 Burmese Anime Bot Running...")
+/stats
+/users
+/search Anime
+/files
+
+/delete ID
+/delname Anime
+/deleteall
+
+/backup
+/broadcast Message
+/reload
+""",
+        parse_mode="HTML"
+    )
+
+print("🤖 Burmese Anime Bot Fast V3 Running...")
 
 while True:
-
     try:
-
         bot.infinity_polling(
             skip_pending=True,
-            timeout=30,
-            long_polling_timeout=30,
+            timeout=20,
+            long_polling_timeout=20,
             allowed_updates=[
                 "message",
                 "callback_query"
@@ -1012,15 +1031,9 @@ while True:
         )
 
     except KeyboardInterrupt:
-
         print("🛑 Bot Stopped")
         break
 
     except Exception as e:
-
-        print(
-            "Bot Error:",
-            e
-        )
-
-        time.sleep(3)
+        print("Bot Error:", e)
+        time.sleep(2)
