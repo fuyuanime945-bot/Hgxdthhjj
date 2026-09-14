@@ -28,7 +28,7 @@ bot = telebot.TeleBot(
 lock = threading.RLock()
 
 send_pool = ThreadPoolExecutor(
-    max_workers=4
+    max_workers=10
 )
 
 BOT_USERNAME = ""
