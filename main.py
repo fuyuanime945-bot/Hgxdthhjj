@@ -9,7 +9,7 @@ import re
 import html
 from collections import deque
 
-TOKEN = "8772869279:AAFPJXR3lWQtCqTiP535o1zn3kVLj3n7cE0"
+TOKEN = "8772869279:AAG_ZeYuQKmQkc0z4lHVmqQ8vtjt3qlY_iU"
 
 ADMIN_ID = 8758830915
 
